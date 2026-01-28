@@ -1,0 +1,60 @@
+name: Free Parallel Scraper (With Inputs)
+
+on:
+  workflow_dispatch:
+    inputs:
+      category_url:
+        description: "Category URL to scrape"
+        required: true
+        type: string
+
+      start_page:
+        description: "Start page number"
+        required: true
+        default: "1"
+
+      end_page:
+        description: "End page number"
+        required: true
+        default: "10"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        batch:
+          - { offset: 0 }
+          - { offset: 1 }
+          - { offset: 2 }
+          - { offset: 3 }
+          - { offset: 4 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        run: |
+          START=$(( ${{ github.event.inputs.start_page }} + ${{ matrix.batch.offset }} ))
+          END=$START
+
+          python scraper.py \
+            --url "${{ github.event.inputs.category_url }}" \
+            --start $START \
+            --end $END \
+            --output result_page_${START}.csv
+
+      - name: Upload CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: csv_page_${{ matrix.batch.offset }}
+          path: result_page_*.csv
