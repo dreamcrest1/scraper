@@ -1,27 +1,38 @@
-name: Scraper Run
+name: Scraper Debug Run
 
 on:
   workflow_dispatch:
     inputs:
       category_url:
-        description: "Category URL"
+        description: "Category URL (copy paste full URL)"
         required: true
+        type: string
+
       start_page:
-        description: "Start page"
+        description: "Start page number (usually 1)"
         required: true
+        default: "1"
+        type: string
+
       end_page:
-        description: "End page"
+        description: "End page number (for debug keep same as start)"
         required: true
+        default: "1"
+        type: string
+
       csv_name:
-        description: "CSV file name (example: products.csv)"
+        description: "CSV file name (example: output.csv)"
         required: true
+        default: "output.csv"
+        type: string
 
 jobs:
-  run-scraper:
+  scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -29,18 +40,34 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Install Gems
-        run: pip install aiohttp pandas beautifulsoup4 lxml
-
-      - name: Run scraper
+      - name: Install Python dependencies
         run: |
+          python -m pip install --upgrade pip
+          pip install aiohttp pandas beautifulsoup4 lxml
+
+      - name: Run scraper (debug mode)
+        run: |
+          echo "Running scraper with inputs:"
+          echo "URL=${{ github.event.inputs.category_url }}"
+          echo "START=${{ github.event.inputs.start_page }}"
+          echo "END=${{ github.event.inputs.end_page }}"
+          echo "CSV=${{ github.event.inputs.csv_name }}"
+
           python scraper_github.py \
             --url "${{ github.event.inputs.category_url }}" \
             --start ${{ github.event.inputs.start_page }} \
             --end ${{ github.event.inputs.end_page }} \
             --output "${{ github.event.inputs.csv_name }}"
 
-      - name: Upload CSV
+      - name: Upload debug HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug_html
+          path: debug_listing_page.html
+
+      - name: Upload CSV output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scraped_csv
