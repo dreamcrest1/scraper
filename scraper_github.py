@@ -3,17 +3,30 @@ import aiohttp
 import pandas as pd
 from bs4 import BeautifulSoup
 import random
-import argparse
 import re
+import argparse
 from urllib.parse import urlparse
 
-# --- CONFIG ---
+# ---------------- CONFIG ----------------
 CONCURRENCY_LIMIT = 5
 MAX_RETRIES = 5
+DEFAULT_STOCK_QUANTITY = "100"
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+]
+
+TEMPLATE_COLUMNS = [
+    'ID','Type','SKU','GTIN, UPC, EAN, or ISBN','Name','Published',
+    'Is featured?','Visibility in catalog','Short description','Description',
+    'Date sale price starts','Date sale price ends','Tax status','Tax class',
+    'In stock?','Stock','Low stock amount','Backorders allowed?',
+    'Sold individually?','Weight (kg)','Length (cm)','Width (cm)',
+    'Height (cm)','Allow customer reviews?','Purchase note','Sale price',
+    'Regular price','Categories','Tags','Shipping class','Images',
+    'Download limit','Download expiry days','Parent','Grouped products',
+    'Upsells','Cross-sells','External URL','Button text','Position','Brands'
 ]
 
 # ---------------- ARGUMENTS ----------------
@@ -26,87 +39,121 @@ def parse_args():
     return parser.parse_args()
 
 # ---------------- HELPERS ----------------
-def get_headers(referer=None):
+def headers(referer=None):
     h = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,*/*",
         "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache"
     }
     if referer:
         h["Referer"] = referer
     return h
 
-def force_save_html(filename, html):
+def save_debug_html(filename, html):
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(html if html else "")
-    print(f"🐞 Debug HTML forced save: {filename}, length={len(html) if html else 0}")
+        f.write(html or "")
+    print(f"🐞 Debug HTML saved: {filename} (len={len(html) if html else 0})")
 
 async def fetch_html(session, url, sem, referer=None):
     async with sem:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                await asyncio.sleep(1)
-                async with session.get(url, headers=get_headers(referer), timeout=45) as r:
+                await asyncio.sleep(random.uniform(1, 2))
+                async with session.get(url, headers=headers(referer), timeout=45) as r:
                     text = await r.text()
-                    print(f"📡 Fetched [{r.status}] {url} (len={len(text)})")
+                    print(f"📡 [{r.status}] {url} (len={len(text)})")
                     return text
             except Exception as e:
-                print(f"⚠️ Fetch error {e}, retry {attempt}")
+                print(f"⚠️ Fetch error {e} retry {attempt}")
                 await asyncio.sleep(attempt * 2)
         return ""
 
-# ---------------- PARSER ----------------
+# ---------------- PARSE PRODUCT ----------------
 def parse_product(html):
     soup = BeautifulSoup(html, "lxml")
-    return {
-        "Name": soup.find("h1").get_text(strip=True) if soup.find("h1") else ""
-    }
+    data = {c: "" for c in TEMPLATE_COLUMNS}
+
+    data["Type"] = "simple"
+    data["Published"] = 1
+    data["In stock?"] = 1
+    data["Stock"] = DEFAULT_STOCK_QUANTITY
+
+    h1 = soup.find("h1")
+    data["Name"] = h1.get_text(strip=True) if h1 else "Unknown"
+    data["SKU"] = f"SKU-{random.randint(100000,999999)}"
+
+    return data
 
 # ---------------- CSV ----------------
-def save_csv(data, filename):
-    print(f"💾 Saving CSV to: {filename}")
-    df = pd.DataFrame(data)
+def save_csv(rows, filename):
+    df = pd.DataFrame(rows)
+    for c in TEMPLATE_COLUMNS:
+        if c not in df.columns:
+            df[c] = ""
+    df = df[TEMPLATE_COLUMNS]
     df.to_csv(filename, index=False)
-    print(f"✅ CSV saved ({len(df)} rows)")
+    print(f"✅ CSV saved: {filename} ({len(df)} rows)")
 
 # ---------------- MAIN ----------------
 async def main():
     args = parse_args()
 
-    print(f"🟢 Starting scrape: {args.url} pages {args.start}–{args.end}")
+    print("🚀 SCRAPER STARTED")
+    print(f"URL: {args.url}")
+    print(f"Pages: {args.start} to {args.end}")
+    print(f"CSV: {args.output}")
+
     parsed = urlparse(args.url)
     base_domain = f"{parsed.scheme}://{parsed.netloc}"
 
-    clean = re.sub(r'[\?&]p=\d+', "", args.url)
-    template = clean + ("&p={}" if "?" in clean else "?p={}")
+    clean_url = re.sub(r'[\?&]p=\d+', '', args.url)
+    page_url = clean_url + ("&p={}" if "?" in clean_url else "?p={}")
 
     sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
     connector = aiohttp.TCPConnector(limit=CONCURRENCY_LIMIT)
-    product_links = []
+
+    product_links = set()
     results = []
 
     async with aiohttp.ClientSession(connector=connector) as session:
+        # -------- LISTING PAGES --------
+        for page in range(args.start, args.end + 1):
+            url = page_url.format(page)
+            print(f"🔎 Listing page: {url}")
+            html = await fetch_html(session, url, sem, base_domain)
 
-        # ---------- ALWAYS SAVE FIRST PAGE HTML ----------
-        first_page_url = template.format(args.start)
-        print(f"🔎 Fetching first page for debug: {first_page_url}")
-        html = await fetch_html(session, first_page_url, sem, base_domain)
+            if page == args.start:
+                save_debug_html("debug_listing_page.html", html)
 
-        # FORCE SAVE
-        force_save_html("debug_listing_page.html", html)
+            if not html:
+                continue
 
-        # Now continue as normal
-        soup = BeautifulSoup(html, "lxml")
-        for a in soup.find_all("a", href=True):
-            product_links.append(a["href"])
+            soup = BeautifulSoup(html, "lxml")
 
-        print(f"🔗 Found {len(product_links)} raw links")
+            # ✅ CORRECT ABF PRODUCT SELECTOR
+            product_cards = soup.find_all(
+                "a",
+                class_=lambda x: x and "product-labeled" in x
+            )
 
+            print(f"🧾 Products found on page {page}: {len(product_cards)}")
+
+            for a in product_cards:
+                href = a.get("href")
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    href = base_domain + href
+                product_links.add(href)
+
+        print(f"🔗 Total unique product URLs: {len(product_links)}")
+
+        # -------- PRODUCT PAGES --------
         for url in product_links:
-            full = url if url.startswith("http") else base_domain + url
-            print(f"➡️ Fetching product page: {full}")
-            p_html = await fetch_html(session, full, sem, base_domain)
-            results.append(parse_product(p_html))
+            html = await fetch_html(session, url, sem, base_domain)
+            if html:
+                results.append(parse_product(html))
 
     save_csv(results, args.output)
 
