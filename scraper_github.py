@@ -7,13 +7,13 @@ import re
 import argparse
 from urllib.parse import urlparse
 
-# --- CONFIG ---
+# ---------------- CONFIG ----------------
 CONCURRENCY_LIMIT = 5
 MAX_RETRIES = 5
 DEFAULT_STOCK_QUANTITY = "100"
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
 ]
 
@@ -29,7 +29,7 @@ TEMPLATE_COLUMNS = [
     'Upsells','Cross-sells','External URL','Button text','Position','Brands'
 ]
 
-# -------- ARGUMENTS --------
+# ---------------- ARGUMENTS ----------------
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True)
@@ -38,36 +38,43 @@ def parse_args():
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
-# -------- NETWORK --------
-def get_headers(referer=None):
+# ---------------- HELPERS ----------------
+def headers(referer=None):
     h = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache"
     }
     if referer:
         h["Referer"] = referer
     return h
+
+def save_debug_html(filename, html):
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"🐞 Debug HTML saved: {filename}")
 
 async def fetch_html(session, url, sem, referer=None):
     async with sem:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 await asyncio.sleep(random.uniform(1, 2))
-                async with session.get(url, headers=get_headers(referer), timeout=40) as r:
+                async with session.get(url, headers=headers(referer), timeout=40) as r:
                     if r.status == 200:
                         text = await r.text()
                         if len(text) > 800:
-                            print(f"➡️ Fetched: {url}")
+                            print(f"✅ Fetched: {url}")
                             return text
-                    elif r.status == 404:
-                        print(f"❌ 404 Not Found: {url}")
-                        return None
+                    elif r.status == 429:
+                        print("⚠️ 429 Rate limit, sleeping")
+                        await asyncio.sleep(30)
             except Exception as e:
-                print(f"⚠️ Fetch error: {e}, retrying {attempt}")
+                print(f"❌ Fetch error {e}, retry {attempt}")
                 await asyncio.sleep(attempt * 2)
         return None
 
-# -------- PARSE PRODUCT --------
+# ---------------- PARSE PRODUCT ----------------
 def parse_product(html):
     soup = BeautifulSoup(html, "lxml")
     data = {c: "" for c in TEMPLATE_COLUMNS}
@@ -83,70 +90,72 @@ def parse_product(html):
 
     return data
 
-# -------- SAVE CSV (always create file) --------
+# ---------------- CSV ----------------
 def save_csv(rows, filename):
-    print(f"🔽 Saving CSV to {filename} ...")
+    print(f"💾 Saving CSV: {filename}")
     df = pd.DataFrame(rows)
 
-    # ensure all columns exist
     for c in TEMPLATE_COLUMNS:
         if c not in df.columns:
             df[c] = ""
 
-    # reorder
     df = df[TEMPLATE_COLUMNS]
-
-    # always save (even if empty)
     df.to_csv(filename, index=False)
-    print(f"✅ CSV saved: {filename} ({len(df)} rows)")
+    print(f"✅ CSV saved ({len(df)} rows)")
 
-# -------- MAIN --------
+# ---------------- MAIN ----------------
 async def main():
     args = parse_args()
-    print(f"📌 URL: {args.url}")
-    print(f"📌 Pages: {args.start} to {args.end}")
-    print(f"📌 Output: {args.output}")
+
+    print("🚀 SCRAPER STARTED")
+    print(f"URL: {args.url}")
+    print(f"Pages: {args.start} to {args.end}")
+    print(f"CSV: {args.output}")
 
     parsed = urlparse(args.url)
     base_domain = f"{parsed.scheme}://{parsed.netloc}"
 
     clean_url = re.sub(r'[\?&]p=\d+', '', args.url)
-    url_template = clean_url + ("&p={}" if "?" in clean_url else "?p={}")
+    page_url = clean_url + ("&p={}" if "?" in clean_url else "?p={}")
 
     sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
     connector = aiohttp.TCPConnector(limit=CONCURRENCY_LIMIT)
 
-    all_links = []
+    product_links = set()
     results = []
 
     async with aiohttp.ClientSession(connector=connector) as session:
-
-        # collect product links
-        for p in range(args.start, args.end + 1):
-            page_url = url_template.format(p)
-            print(f"🔎 Scraping listing page: {page_url}")
-            html = await fetch_html(session, page_url, sem, base_domain)
+        # -------- LISTING PAGES --------
+        for page in range(args.start, args.end + 1):
+            url = page_url.format(page)
+            print(f"🔎 Listing page: {url}")
+            html = await fetch_html(session, url, sem, base_domain)
             if not html:
+                print("❌ No HTML for listing page")
                 continue
+
+            # SAVE DEBUG HTML (ONLY FIRST PAGE)
+            if page == args.start:
+                save_debug_html("debug_listing_page.html", html)
+
+            print(f"📄 Listing HTML length: {len(html)}")
 
             soup = BeautifulSoup(html, "lxml")
             for a in soup.find_all("a", href=True):
                 href = a["href"]
-                if href and "product" in href:
+                if "product" in href:
                     if href.startswith("/"):
                         href = base_domain + href
-                    if href not in all_links:
-                        all_links.append(href)
+                    product_links.add(href)
 
-        print(f"🧾 Found {len(all_links)} product links")
+        print(f"🔗 Found {len(product_links)} product URLs")
 
-        # scrape each product
-        for url in all_links:
+        # -------- PRODUCT PAGES --------
+        for url in product_links:
             html = await fetch_html(session, url, sem, base_domain)
             if html:
                 results.append(parse_product(html))
 
-    # always save CSV
     save_csv(results, args.output)
 
 if __name__ == "__main__":
