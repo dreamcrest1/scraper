@@ -10,16 +10,17 @@ import argparse
 from urllib.parse import urlparse
 from datetime import timedelta
 
-# ---------------- CONFIG ----------------
-CONCURRENCY_LIMIT = 3
+# --- CONFIGURATION ---
+CONCURRENCY_LIMIT = 5
 MAX_RETRIES = 5
 BASE_DELAY = 1.0
 BACKUP_FREQUENCY = 20
 DEFAULT_STOCK_QUANTITY = "100"
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
 ]
 
 TEMPLATE_COLUMNS = [
@@ -44,94 +45,92 @@ def parse_args():
     return parser.parse_args()
 
 # ---------------- NETWORK ----------------
-def headers():
-    return {
+def headers(referer=None):
+    h = {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,*/*"
     }
+    if referer:
+        h["Referer"] = referer
+    return h
 
-async def fetch(session, url, sem):
-    async with sem:
-        for i in range(1, MAX_RETRIES + 1):
+async def fetch_html_safe(session, url, semaphore, referer=None):
+    async with semaphore:
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
                 await asyncio.sleep(random.uniform(1, 2))
-                async with session.get(url, headers=headers(), timeout=40) as r:
+                async with session.get(url, headers=headers(referer), timeout=45) as r:
                     if r.status == 200:
-                        return await r.text()
+                        text = await r.text()
+                        if len(text) > 1000:
+                            return text
                     elif r.status == 429:
-                        await asyncio.sleep(30)
+                        await asyncio.sleep(60)
             except:
-                await asyncio.sleep(i * 2)
+                await asyncio.sleep(attempt * 2)
         return None
 
 # ---------------- PARSER ----------------
-def parse_product(html):
+def parse_product_html(html):
     soup = BeautifulSoup(html, "lxml")
     data = {c: "" for c in TEMPLATE_COLUMNS}
-
     data["Type"] = "simple"
     data["Published"] = 1
     data["In stock?"] = 1
 
     h1 = soup.find("h1")
     data["Name"] = h1.get_text(strip=True) if h1 else "Unknown"
-
     data["SKU"] = f"SKU-{random.randint(100000,999999)}"
     data["Stock"] = DEFAULT_STOCK_QUANTITY
     return data
 
-# ---------------- LISTING ----------------
-async def collect_links(session, url_template, page, base, sem):
-    html = await fetch(session, url_template.format(page), sem)
-    if not html:
-        return []
-
-    soup = BeautifulSoup(html, "lxml")
-    links = []
-
-    for a in soup.find_all("a", href=True):
-        if "product" in a["href"]:
-            link = a["href"]
-            if link.startswith("/"):
-                link = base + link
-            links.append(link)
-
-    return list(set(links))
-
 # ---------------- CSV ----------------
-def save_csv(rows, file):
-    if not rows:
+def save_csv(data, filename):
+    if not data:
+        print("⚠️ No data to save")
         return
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(data)
     for c in TEMPLATE_COLUMNS:
         if c not in df.columns:
             df[c] = ""
     df = df[TEMPLATE_COLUMNS]
-    df.to_csv(file, index=False)
+    df.to_csv(filename, index=False)
+    print(f"✅ Saved CSV: {filename}")
 
 # ---------------- MAIN ----------------
 async def main():
     args = parse_args()
     parsed = urlparse(args.url)
-    base = f"{parsed.scheme}://{parsed.netloc}"
-    clean = re.sub(r'[\?&]p=\d+', '', args.url)
-    template = clean + ("&p={}" if "?" in clean else "?p={}")
+    base_domain = f"{parsed.scheme}://{parsed.netloc}"
+    clean_url = re.sub(r'[\?&]p=\d+', '', args.url)
+    url_template = clean_url + ("&p={}" if "?" in clean_url else "?p={}")
 
-    sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
+    semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
     connector = aiohttp.TCPConnector(limit=CONCURRENCY_LIMIT)
+    results = []
 
-    all_products = []
     async with aiohttp.ClientSession(connector=connector) as session:
         urls = []
         for p in range(args.start, args.end + 1):
-            urls.extend(await collect_links(session, template, p, base, sem))
+            html = await fetch_html_safe(session, url_template.format(p), semaphore, base_domain)
+            if html:
+                soup = BeautifulSoup(html, "lxml")
+                for a in soup.find_all("a", href=True):
+                    if "product" in a["href"]:
+                        link = a["href"]
+                        if link.startswith("/"):
+                            link = base_domain + link
+                        urls.append(link)
+
+        urls = list(set(urls))
+        print(f"🔗 Found {len(urls)} product URLs")
 
         for url in urls:
-            html = await fetch(session, url, sem)
+            html = await fetch_html_safe(session, url, semaphore, base_domain)
             if html:
-                all_products.append(parse_product(html))
+                results.append(parse_product_html(html))
 
-    save_csv(all_products, args.output)
+    save_csv(results, args.output)
 
 if __name__ == "__main__":
     asyncio.run(main())
